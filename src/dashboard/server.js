@@ -114,6 +114,7 @@ global._trackMsg = _trackMsg;
 
 // ── Auth Token store ─────────────────────────────────────────────────────────
 const _tokens = new Map();
+const _loginAttempts = new Map();
 function genToken() {
   const tok = crypto.randomBytes(24).toString("hex");
   _tokens.set(tok, Date.now() + 12 * 3600 * 1000);
@@ -134,10 +135,9 @@ function getDashPwd() {
   try {
     cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
   } catch (_) {
-    return "dosk";
+    return "";
   }
-  if (cfg.dashboard?.password) return cfg.dashboard.password;
-  return "dosk";
+  return typeof cfg.dashboard?.password === "string" ? cfg.dashboard.password : "";
 }
 
 // ── Safe Editor File Ops ─────────────────────────────────────────────────────
@@ -237,7 +237,7 @@ function getRegisteredCommandsList() {
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
 function auth(req, res, next) {
-  const tok = req.headers["x-dosk-token"] || req.headers["x-david-token"] || req.query.token;
+  const tok = req.headers["x-dosk-token"] || req.headers["x-david-token"];
   if (tok && validToken(tok)) return next();
   res.status(401).json({ ok: false, error: "Unauthorized" });
 }
@@ -478,14 +478,22 @@ function setupDashboardRoutes(app) {
 
   // Auth
   app.post("/api/login", (req, res) => {
-    const { password } = req.body || {};
+    const ip = String(req.ip || req.socket.remoteAddress || "unknown");
+    const now = Date.now();
+    let attempt = _loginAttempts.get(ip);
+    if (!attempt || now - attempt.startedAt > 900000) attempt = { startedAt: now, count: 0 };
+    if (attempt.count >= 8) return res.status(429).json({ ok: false, error: "محاولات كثيرة. حاول بعد 15 دقيقة." });
+    attempt.count++;
+    _loginAttempts.set(ip, attempt);
+    const password = req.body?.password;
     const dashboardPassword = getDashPwd();
-    if (password === dashboardPassword) {
-      const tok = genToken();
-      res.json({ ok: true, token: tok });
-    } else {
-      res.json({ ok: false, error: "كلمة المرور غير صحيحة" });
+    if (!dashboardPassword) return res.status(503).json({ ok: false, error: "اضبط DASHBOARD_PASSWORD قبل تشغيل الداشبورد." });
+    if (typeof password === "string" && password.length === dashboardPassword.length && password.length <= 256 &&
+      crypto.timingSafeEqual(Buffer.from(password), Buffer.from(dashboardPassword))) {
+      _loginAttempts.delete(ip);
+      return res.json({ ok: true, token: genToken() });
     }
+    return res.status(401).json({ ok: false, error: "كلمة المرور غير صحيحة" });
   });
 
   app.post("/api/logout", auth, (req, res) => {
@@ -1702,9 +1710,10 @@ module.exports = {
   _addBotMsg,
   _trackMsg,
   getIO: () => _io,
+  auth,
   attachSocketIO: (server) => {
     if (socketio && !_io) {
-      _io = socketio(server, { cors: { origin: "*" } });
+      _io = socketio(server, { cors: { origin: false } });
       _io.on("connection", socket => {
         const tok = socket.handshake.query?.token;
         if (!validToken(tok)) {

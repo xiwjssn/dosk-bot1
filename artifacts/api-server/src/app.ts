@@ -33,7 +33,15 @@ app.use(
   }),
 );
 
-app.use(cors());
+const allowedOrigins = new Set((process.env.DASHBOARD_ORIGIN || "").split(",").map(v => v.trim()).filter(Boolean));
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error("Origin not allowed"));
+  },
+  credentials: false,
+  allowedHeaders: ["Content-Type", "X-Dosk-Token", "X-David-Token"],
+}));
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 

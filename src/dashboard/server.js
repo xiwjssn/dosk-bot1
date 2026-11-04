@@ -114,6 +114,7 @@ global._trackMsg = _trackMsg;
 
 // ── Auth Token store ─────────────────────────────────────────────────────────
 const _tokens = new Map();
+const _loginAttempts = new Map();
 function genToken() {
   const tok = crypto.randomBytes(24).toString("hex");
   _tokens.set(tok, Date.now() + 12 * 3600 * 1000);
@@ -134,10 +135,9 @@ function getDashPwd() {
   try {
     cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
   } catch (_) {
-    return "dosk";
+    return "";
   }
-  if (cfg.dashboard?.password) return cfg.dashboard.password;
-  return "dosk";
+  return typeof cfg.dashboard?.password === "string" ? cfg.dashboard.password : "";
 }
 
 // ── Safe Editor File Ops ─────────────────────────────────────────────────────
@@ -235,9 +235,24 @@ function getRegisteredCommandsList() {
   return list;
 }
 
+function resolveDashboardPath(rel) {
+  if (typeof rel !== "string" || !rel.trim() || rel.includes("\\0")) throw new Error("مسار غير صالح");
+  const full = path.resolve(ROOT, rel);
+  const relative = path.relative(ROOT, full);
+  if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("مسار خارج النطاق");
+  const normalized = relative.split(path.sep).join("/");
+  if (/(^|\\/)(?:\\.env(?:\\..*)?|cookies\\.json|\\.git|node_modules)(?:\\/|$)/i.test(normalized)) throw new Error("الوصول إلى هذا المسار محظور");
+  let current = ROOT;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error("الروابط الرمزية غير مسموحة");
+  }
+  return full;
+}
+
 // ── Auth middleware ──────────────────────────────────────────────────────────
 function auth(req, res, next) {
-  const tok = req.headers["x-dosk-token"] || req.headers["x-david-token"] || req.query.token;
+  const tok = req.headers["x-dosk-token"] || req.headers["x-david-token"];
   if (tok && validToken(tok)) return next();
   res.status(401).json({ ok: false, error: "Unauthorized" });
 }
@@ -478,14 +493,22 @@ function setupDashboardRoutes(app) {
 
   // Auth
   app.post("/api/login", (req, res) => {
-    const { password } = req.body || {};
+    const ip = String(req.ip || req.socket.remoteAddress || "unknown");
+    const now = Date.now();
+    let attempt = _loginAttempts.get(ip);
+    if (!attempt || now - attempt.startedAt > 900000) attempt = { startedAt: now, count: 0 };
+    if (attempt.count >= 8) return res.status(429).json({ ok: false, error: "محاولات كثيرة. حاول بعد 15 دقيقة." });
+    attempt.count++;
+    _loginAttempts.set(ip, attempt);
+    const password = req.body?.password;
     const dashboardPassword = getDashPwd();
-    if (password === dashboardPassword) {
-      const tok = genToken();
-      res.json({ ok: true, token: tok });
-    } else {
-      res.json({ ok: false, error: "كلمة المرور غير صحيحة" });
+    if (!dashboardPassword) return res.status(503).json({ ok: false, error: "اضبط DASHBOARD_PASSWORD قبل تشغيل الداشبورد." });
+    if (typeof password === "string" && password.length === dashboardPassword.length && password.length <= 256 &&
+      crypto.timingSafeEqual(Buffer.from(password), Buffer.from(dashboardPassword))) {
+      _loginAttempts.delete(ip);
+      return res.json({ ok: true, token: genToken() });
     }
+    return res.status(401).json({ ok: false, error: "كلمة المرور غير صحيحة" });
   });
 
   app.post("/api/logout", auth, (req, res) => {
@@ -528,7 +551,12 @@ function setupDashboardRoutes(app) {
       if (fs.existsSync(CONFIG_PATH)) {
         old = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
       }
-      const updated = Object.assign({}, old, req.body);
+      const input = req.body || {};
+      const allowed = new Set(["botName", "prefix", "ownerID", "adminBot", "superAdminBot", "adminOnly", "protection"]);
+      if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(k => !allowed.has(k))) {
+        return res.status(400).json({ ok: false, error: "إعدادات غير صالحة أو تحتوي حقولاً غير مسموحة" });
+      }
+      const updated = Object.assign({}, old, input);
       fs.writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
       if (global.DoskBot) global.DoskBot.config = updated;
       if (_io) _io.emit("config-reloaded", { ts: Date.now() });
@@ -1313,9 +1341,7 @@ module.exports = {
   app.get("/api/files/read", auth, (req, res) => {
     try {
       const rel = req.query.path || "";
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      const full = resolveDashboardPath(rel);
       if (!fs.existsSync(full)) return res.json({ ok: false, error: "الملف غير موجود" });
       const stat = fs.statSync(full);
       if (stat.size > 1024 * 1024) return res.json({ ok: false, error: "الملف كبير جداً" });
@@ -1329,9 +1355,8 @@ module.exports = {
   app.post("/api/files/write", auth, (req, res) => {
     try {
       const { path: rel, content } = req.body || {};
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > 1024 * 1024) return res.status(413).json({ ok: false, error: "المحتوى غير صالح أو يتجاوز 1MB" });
+      const full = resolveDashboardPath(rel);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       safeEditorWrite(full, String(content || ""));
       res.json({ ok: true });
@@ -1343,9 +1368,7 @@ module.exports = {
   app.post("/api/files/new", auth, (req, res) => {
     try {
       const { path: rel, isDir } = req.body || {};
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      const full = resolveDashboardPath(rel);
       if (isDir) {
         fs.mkdirSync(full, { recursive: true });
       } else {
@@ -1361,9 +1384,7 @@ module.exports = {
   app.delete("/api/files/delete", auth, (req, res) => {
     try {
       const rel = req.query.path || "";
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      const full = resolveDashboardPath(rel);
       if (!fs.existsSync(full)) return res.json({ ok: false, error: "الملف غير موجود" });
       fs.rmSync(full, { recursive: true, force: true });
       res.json({ ok: true });
@@ -1391,13 +1412,18 @@ module.exports = {
   app.post("/api/env/set", auth, (req, res) => {
     try {
       const { pairs } = req.body || {};
-      if (!pairs || typeof pairs !== "object") return res.json({ ok: false, error: "pairs مطلوب" });
+      const allowedKeys = new Set(["DASHBOARD_PASSWORD", "OPENAI_API_KEY", "GITHUB_TOKEN", "RAILWAY_TOKEN"]);
+      if (!pairs || typeof pairs !== "object" || Array.isArray(pairs)) return res.status(400).json({ ok: false, error: "pairs مطلوب" });
+      for (const [key, value] of Object.entries(pairs)) {
+        if (!allowedKeys.has(key) || typeof value !== "string" || /[\\r\\n\\0]/.test(value) || value.length > 4096) {
+          return res.status(400).json({ ok: false, error: "مفتاح أو قيمة بيئية غير مسموحة" });
+        }
+      }
       const envPath = path.join(ROOT, ".env");
       let content = "";
       try { content = fs.readFileSync(envPath, "utf8"); } catch (_) {}
       const lines = content.split("\n");
       for (const [key, val] of Object.entries(pairs)) {
-        if (!val) continue;
         process.env[key] = val;
         const idx = lines.findIndex(l => l.startsWith(key + "="));
         if (idx >= 0) lines[idx] = `${key}=${val}`;
@@ -1702,9 +1728,10 @@ module.exports = {
   _addBotMsg,
   _trackMsg,
   getIO: () => _io,
+  auth,
   attachSocketIO: (server) => {
     if (socketio && !_io) {
-      _io = socketio(server, { cors: { origin: "*" } });
+      _io = socketio(server, { cors: { origin: false } });
       _io.on("connection", socket => {
         const tok = socket.handshake.query?.token;
         if (!validToken(tok)) {

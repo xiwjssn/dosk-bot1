@@ -2,6 +2,9 @@ import { Router } from "express";
 import { getBotStatus, getBotApi, startBot, addDeveloper, removeDeveloper, reloadCookies } from "../lib/bot.js";
 
 const botRouter = Router();
+const dashboard = require("../../../src/dashboard/server.js");
+if (typeof dashboard.auth !== "function") throw new Error("Dashboard authentication middleware is unavailable");
+botRouter.use(dashboard.auth);
 
 botRouter.get("/bot/status", (_req, res) => {
   res.json(getBotStatus());

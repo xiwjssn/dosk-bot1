@@ -46,9 +46,7 @@ function start() {
   child.on("exit", (code, signal) => {
     if (stableTimer) clearTimeout(stableTimer);
     if (code === 0) {
-      log("خروج نظيف — إعادة تشغيل فورية…");
-      restarts = 0;
-      setTimeout(start, 1000);
+      log("تم إيقاف البوت بطلب صريح — لن تتم إعادة تشغيله.");
       return;
     }
     log(`خرج بكود ${code}/${signal} — إعادة بعد 3 ثوانٍ`);

@@ -121,11 +121,18 @@ function startBot() {
         if (!message) return;
         _bufferMsg(message);
 
-        // Handle group name protection
-        if (message.type === "event" && message.logMessageType === "log:thread-name") {
-          const tid = String(message.threadID);
-          const nmCmd = require("./src/commands/nm");
-          nmCmd.onEvent?.({ api, event: message });
+        if (message.type === "event") {
+          // Route group events to the protection handlers.
+          if (message.logMessageType === "log:thread-name") {
+            const nmCmd = require("./src/commands/nm");
+            nmCmd.onEvent?.({ api, event: message });
+          }
+          if (message.logMessageType === "log:subscribe") {
+            const addLock = require("./src/commands/addlock");
+            Promise.resolve(addLock.onEvent?.({ api, event: message })).catch(err =>
+              console.error("[AddLock] Event handler failed:", err?.message || err)
+            );
+          }
         }
       });
     }

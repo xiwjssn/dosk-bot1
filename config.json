@@ -9,7 +9,6 @@
     "61594321502697"
   ],
   "dashboard": {
-    "password": "dosk",
     "port": 5000
   },
   "adminOnly": {

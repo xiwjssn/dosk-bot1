@@ -551,7 +551,12 @@ function setupDashboardRoutes(app) {
       if (fs.existsSync(CONFIG_PATH)) {
         old = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf8"));
       }
-      const updated = Object.assign({}, old, req.body);
+      const input = req.body || {};
+      const allowed = new Set(["botName", "prefix", "ownerID", "adminBot", "superAdminBot", "adminOnly", "protection"]);
+      if (!input || typeof input !== "object" || Array.isArray(input) || Object.keys(input).some(k => !allowed.has(k))) {
+        return res.status(400).json({ ok: false, error: "إعدادات غير صالحة أو تحتوي حقولاً غير مسموحة" });
+      }
+      const updated = Object.assign({}, old, input);
       fs.writeFileSync(CONFIG_PATH, JSON.stringify(updated, null, 2), "utf8");
       if (global.DoskBot) global.DoskBot.config = updated;
       if (_io) _io.emit("config-reloaded", { ts: Date.now() });
@@ -1379,9 +1384,7 @@ module.exports = {
   app.delete("/api/files/delete", auth, (req, res) => {
     try {
       const rel = req.query.path || "";
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      const full = resolveDashboardPath(rel);
       if (!fs.existsSync(full)) return res.json({ ok: false, error: "الملف غير موجود" });
       fs.rmSync(full, { recursive: true, force: true });
       res.json({ ok: true });
@@ -1409,13 +1412,18 @@ module.exports = {
   app.post("/api/env/set", auth, (req, res) => {
     try {
       const { pairs } = req.body || {};
-      if (!pairs || typeof pairs !== "object") return res.json({ ok: false, error: "pairs مطلوب" });
+      const allowedKeys = new Set(["DASHBOARD_PASSWORD", "OPENAI_API_KEY", "GITHUB_TOKEN", "RAILWAY_TOKEN"]);
+      if (!pairs || typeof pairs !== "object" || Array.isArray(pairs)) return res.status(400).json({ ok: false, error: "pairs مطلوب" });
+      for (const [key, value] of Object.entries(pairs)) {
+        if (!allowedKeys.has(key) || typeof value !== "string" || /[\\r\\n\\0]/.test(value) || value.length > 4096) {
+          return res.status(400).json({ ok: false, error: "مفتاح أو قيمة بيئية غير مسموحة" });
+        }
+      }
       const envPath = path.join(ROOT, ".env");
       let content = "";
       try { content = fs.readFileSync(envPath, "utf8"); } catch (_) {}
       const lines = content.split("\n");
       for (const [key, val] of Object.entries(pairs)) {
-        if (!val) continue;
         process.env[key] = val;
         const idx = lines.findIndex(l => l.startsWith(key + "="));
         if (idx >= 0) lines[idx] = `${key}=${val}`;

@@ -235,6 +235,21 @@ function getRegisteredCommandsList() {
   return list;
 }
 
+function resolveDashboardPath(rel) {
+  if (typeof rel !== "string" || !rel.trim() || rel.includes("\\0")) throw new Error("مسار غير صالح");
+  const full = path.resolve(ROOT, rel);
+  const relative = path.relative(ROOT, full);
+  if (!relative || relative === ".." || relative.startsWith(".." + path.sep) || path.isAbsolute(relative)) throw new Error("مسار خارج النطاق");
+  const normalized = relative.split(path.sep).join("/");
+  if (/(^|\\/)(?:\\.env(?:\\..*)?|cookies\\.json|\\.git|node_modules)(?:\\/|$)/i.test(normalized)) throw new Error("الوصول إلى هذا المسار محظور");
+  let current = ROOT;
+  for (const part of relative.split(path.sep)) {
+    current = path.join(current, part);
+    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) throw new Error("الروابط الرمزية غير مسموحة");
+  }
+  return full;
+}
+
 // ── Auth middleware ──────────────────────────────────────────────────────────
 function auth(req, res, next) {
   const tok = req.headers["x-dosk-token"] || req.headers["x-david-token"];
@@ -1321,9 +1336,7 @@ module.exports = {
   app.get("/api/files/read", auth, (req, res) => {
     try {
       const rel = req.query.path || "";
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      const full = resolveDashboardPath(rel);
       if (!fs.existsSync(full)) return res.json({ ok: false, error: "الملف غير موجود" });
       const stat = fs.statSync(full);
       if (stat.size > 1024 * 1024) return res.json({ ok: false, error: "الملف كبير جداً" });
@@ -1337,9 +1350,8 @@ module.exports = {
   app.post("/api/files/write", auth, (req, res) => {
     try {
       const { path: rel, content } = req.body || {};
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      if (typeof content !== "string" || Buffer.byteLength(content, "utf8") > 1024 * 1024) return res.status(413).json({ ok: false, error: "المحتوى غير صالح أو يتجاوز 1MB" });
+      const full = resolveDashboardPath(rel);
       fs.mkdirSync(path.dirname(full), { recursive: true });
       safeEditorWrite(full, String(content || ""));
       res.json({ ok: true });
@@ -1351,9 +1363,7 @@ module.exports = {
   app.post("/api/files/new", auth, (req, res) => {
     try {
       const { path: rel, isDir } = req.body || {};
-      if (!rel || rel.includes("..")) return res.json({ ok: false, error: "مسار غير صالح" });
-      const full = path.join(ROOT, rel);
-      if (!full.startsWith(ROOT)) return res.json({ ok: false, error: "مسار خارج النطاق" });
+      const full = resolveDashboardPath(rel);
       if (isDir) {
         fs.mkdirSync(full, { recursive: true });
       } else {
